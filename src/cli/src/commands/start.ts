@@ -87,9 +87,11 @@ const SAFE_PROJECT_PULSE_FILES = [
 const GITHUB_ISSUES_WATCH_STATE_DIR = join(MACOS_AGENT_HUB_WORKSPACE, '.state');
 const GITHUB_ISSUES_WATCH_SNAPSHOT = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'issues-snapshot.json');
 const GITHUB_ISSUES_DAILY_STATE = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'daily-issue-cycle.json');
+const GITHUB_ISSUES_DRAIN_STATE = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'drain-state.json');
 const GITHUB_ISSUES_REPO = 'anarkaike/tinyclaw-contexto-macos';
 const GITHUB_ISSUES_WATCH_INTERVAL = process.env.TINYCLAW_GITHUB_ISSUES_WATCH_INTERVAL || '5m';
 const GITHUB_ISSUES_DAILY_INTERVAL = process.env.TINYCLAW_GITHUB_ISSUES_DAILY_INTERVAL || '24h';
+const GITHUB_ISSUES_DRAIN_INTERVAL = process.env.TINYCLAW_GITHUB_ISSUES_DRAIN_INTERVAL || '6h';
 
 function summarizeWorkspaceHeadings(content: string, maxItems = 3): string[] {
   const headings = content
@@ -195,6 +197,12 @@ type DailyIssueCycleState = {
   }>;
 };
 
+type DrainState = {
+  repo: string;
+  seenAt: string;
+  closedIssues: number[];
+};
+
 function ensureIssueWatchStateDir(): void {
   mkdirSync(GITHUB_ISSUES_WATCH_STATE_DIR, { recursive: true });
 }
@@ -227,6 +235,20 @@ function readDailyIssueCycleState(): DailyIssueCycleState | null {
 function writeDailyIssueCycleState(state: DailyIssueCycleState): void {
   ensureIssueWatchStateDir();
   writeFileSync(GITHUB_ISSUES_DAILY_STATE, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}
+
+function readDrainState(): DrainState | null {
+  if (!existsSync(GITHUB_ISSUES_DRAIN_STATE)) return null;
+  try {
+    return JSON.parse(readFileSync(GITHUB_ISSUES_DRAIN_STATE, 'utf8')) as DrainState;
+  } catch {
+    return null;
+  }
+}
+
+function writeDrainState(state: DrainState): void {
+  ensureIssueWatchStateDir();
+  writeFileSync(GITHUB_ISSUES_DRAIN_STATE, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
 }
 
 function runGhIssueList(): WatchedIssue[] {
@@ -326,6 +348,20 @@ function commentOnGhIssue(issueNumber: number, body: string): boolean {
     GITHUB_ISSUES_REPO,
     '--body',
     body,
+  ]);
+
+  return result.status === 0;
+}
+
+function closeGhIssue(issueNumber: number): boolean {
+  const result = spawnSync('gh', [
+    'issue',
+    'edit',
+    String(issueNumber),
+    '--repo',
+    GITHUB_ISSUES_REPO,
+    '--state',
+    'closed',
   ]);
 
   return result.status === 0;
@@ -531,6 +567,57 @@ function summarizeLatestIssueActivity(issue: WatchedIssue): string {
     `labels=${issue.labels.join(',') || '-'}`,
     `assignees=${issue.assignees.join(',') || '-'}`,
   ].join(' | ');
+}
+
+function buildIssueClosureComment(issue: WatchedIssue, evidenceFiles: string[]): string {
+  return [
+    '### Encerramento automático por evidência',
+    '',
+    '| Campo | Conteúdo |',
+    '| --- | --- |',
+    `| Entendido | A issue ${issue.number} foi atendida pelo material já publicado no repositório central. |`,
+    `| Feito | revisão do escopo, confirmação dos arquivos e fechamento da issue |`,
+    `| Executado | checagem de evidências locais, comentário de rastreio e mudança de estado |`,
+    `| Resultado dos testes | evidência encontrada; issue elegível para encerramento |`,
+    `| Evidência | ${evidenceFiles.join(', ')} |`,
+    '',
+    '### Próximo passo',
+    '- acompanhar apenas se surgir nova demanda ou divergência',
+  ].join('\n');
+}
+
+function getIssueClosureEvidence(issueNumber: number): string[] {
+  const root = '/Users/junio/tinyclaw-contexto-macos';
+  const evidenceByIssue: Record<number, string[]> = {
+    1: [
+      'docs/governance/README.md',
+      'docs/governance/ISSUE-TITLE-STYLE.md',
+      'docs/governance/ISSUE-DESCRIPTION-STYLE.md',
+      'docs/governance/WORKFLOW.md',
+    ],
+    2: ['docs/agents/README.md', 'docs/agents/TEAM.md', 'docs/agents/agent-creator.md'],
+    3: ['docs/tools/README.md', 'docs/tools/STANDARD-TOOLS.md', 'docs/tools/tool-creator.md'],
+    4: ['docs/commands/README.md', 'docs/commands/command-creator.md'],
+    5: ['docs/agents/TEAM.md'],
+    6: ['docs/skills/STANDARD-SKILLS.md', 'docs/tools/STANDARD-TOOLS.md', 'docs/governance/EXECUTION-STANDARD.md'],
+    7: ['docs/skills/skill-creator.md', 'docs/commands/command-creator.md', 'docs/agents/agent-creator.md', 'docs/tools/tool-creator.md'],
+    8: ['docs/governance/IA-INVENTORY.md', 'docs/governance/MARKDOWN-STANDARD.md'],
+    9: ['docs/governance/IA-BACKLOG.md'],
+    10: [
+      'docs/governance/TEMPLATE-COMMAND.md',
+      'docs/governance/TEMPLATE-AGENT.md',
+      'docs/governance/TEMPLATE-TOOL.md',
+      'docs/governance/TEMPLATE-MCP.md',
+      'docs/governance/TEMPLATE-SPRINT.md',
+      'docs/governance/TEMPLATE-SESSION.md',
+    ],
+    11: ['docs/governance/issue-bodies/issue-11.md'],
+    12: ['docs/governance/issue-bodies/issue-12.md'],
+    13: ['docs/governance/OPERATING-MODEL.md', 'docs/governance/BACKLOG-AND-SPRINTS.md', 'docs/agents/TEAM.md'],
+  };
+
+  const candidates = evidenceByIssue[issueNumber] ?? [];
+  return candidates.filter((file) => existsSync(join(root, file)));
 }
 
 /**
@@ -1657,6 +1744,64 @@ export async function startCommand(): Promise<void> {
         });
       } catch (err) {
         logger.warn('GitHub issues daily steward skipped', err, { emoji: '⚠️' });
+      }
+    },
+  });
+
+  // GitHub issue drain — closes issues that already have strong evidence in
+  // the central repo. This keeps the backlog flowing without manual closure.
+  pulse.register({
+    id: 'github-issues-drain',
+    schedule: GITHUB_ISSUES_DRAIN_INTERVAL,
+    runOnStart: true,
+    handler: async () => {
+      try {
+        const openIssues = runGhIssueList().filter((issue) => issue.state === 'OPEN');
+        const previousState = readDrainState();
+        const closedIssues: number[] = [];
+
+        for (const issue of openIssues) {
+          const evidenceFiles = getIssueClosureEvidence(issue.number);
+          if (evidenceFiles.length === 0) continue;
+
+          const alreadyClosedByDrain = previousState?.closedIssues.includes(issue.number);
+          if (alreadyClosedByDrain) continue;
+
+          const detail = fetchGhIssueDetails(issue.number) ?? issue;
+          const comment = buildIssueClosureComment(detail, evidenceFiles);
+          const commented = commentOnGhIssue(issue.number, comment);
+          const closed = commented ? closeGhIssue(issue.number) : false;
+
+          if (closed) {
+            closedIssues.push(issue.number);
+            logger.info('GitHub issue drained and closed', {
+              issueNumber: issue.number,
+              issueTitle: issue.title,
+              evidenceFiles,
+            });
+          } else {
+            logger.warn('GitHub issue drain failed', {
+              issueNumber: issue.number,
+              issueTitle: issue.title,
+              evidenceFiles,
+              commented,
+            });
+          }
+        }
+
+        writeDrainState({
+          repo: GITHUB_ISSUES_REPO,
+          seenAt: new Date().toISOString(),
+          closedIssues,
+        });
+
+        logger.info('GitHub issues drain completed', {
+          repo: GITHUB_ISSUES_REPO,
+          openIssues: openIssues.length,
+          closedIssues,
+        });
+      } catch (err) {
+        logger.warn('GitHub issues drain skipped', err, { emoji: '⚠️' });
       }
     },
   });

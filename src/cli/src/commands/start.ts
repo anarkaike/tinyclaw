@@ -180,6 +180,8 @@ type WatchedIssue = {
   assignees: string[];
   author?: string;
   body?: string;
+  latestCommentAuthor?: string;
+  latestCommentBody?: string;
 };
 
 type IssueWatchSnapshot = {
@@ -337,6 +339,38 @@ function fetchGhIssueDetails(issueNumber: number): WatchedIssue | null {
   } catch {
     return null;
   }
+}
+
+function fetchLatestIssueComment(issueNumber: number): { author?: string; body?: string } | null {
+  const result = spawnSync('gh', [
+    'api',
+    `repos/${GITHUB_ISSUES_REPO}/issues/${issueNumber}/comments`,
+    '--jq',
+    'sort_by(.updated_at) | last | {author: .user.login, body: .body}',
+  ]);
+
+  if (result.status !== 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(result.stdout.toString().trim()) as { author?: string; body?: string };
+    return parsed ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function isHumanDirectedComment(commentBody: string | undefined): boolean {
+  if (!commentBody) return false;
+  const normalized = commentBody.toLowerCase();
+  return !(
+    normalized.includes('### atualização automática da equipe') ||
+    normalized.includes('### encerramento automático por evidência') ||
+    normalized.includes('### entendimento do agente') ||
+    normalized.includes('### comentário automático') ||
+    normalized.includes('### atualização diária')
+  );
 }
 
 function commentOnGhIssue(issueNumber: number, body: string): boolean {
@@ -1635,6 +1669,17 @@ export async function startCommand(): Promise<void> {
           };
         });
 
+        const humanCommentIssues = changes
+          .map((change) => {
+            const latestComment = fetchLatestIssueComment(change.issue.number);
+            return {
+              issue: change.issue,
+              latestComment,
+              isHuman: isHumanDirectedComment(latestComment?.body),
+            };
+          })
+          .filter((entry) => entry.isHuman);
+
         const needsBroadcast = issueSessionMatches.some((match) => match.targets.length > 1 || match.confidence < 4);
 
         nudgeEngine.schedule({
@@ -1647,10 +1692,37 @@ export async function startCommand(): Promise<void> {
             repo: GITHUB_ISSUES_REPO,
             issueSessionMatches,
             needsBroadcast,
+            humanCommentIssues,
           },
         });
 
-        if (needsBroadcast) {
+        if (humanCommentIssues.length > 0) {
+          const responseBody = [
+            '### Entendimento do agente',
+            '',
+            'Identificamos um comentário humano que altera a linha de execução desta issue.',
+            '',
+            '### O que pretendemos fazer',
+            '- pausar a continuidade automática desta linha',
+            '- responder com o plano ajustado',
+            '- aguardar sua aprovação antes de seguir',
+            '',
+            '### Como vamos proceder',
+            '- revisar o comentário recebido',
+            '- adaptar o escopo ou a implementação conforme solicitado',
+            '- retomar somente após confirmação explícita',
+          ].join('\\n');
+
+          for (const entry of humanCommentIssues) {
+            commentOnGhIssue(entry.issue.number, responseBody);
+          }
+
+          intercom.emit('task:queued', 'github:issues', {
+            repo: GITHUB_ISSUES_REPO,
+            mode: 'human-pause',
+            humanCommentIssues,
+          });
+        } else if (needsBroadcast) {
           intercom.emit('task:queued', 'github:issues', {
             repo: GITHUB_ISSUES_REPO,
             mode: 'broadcast',

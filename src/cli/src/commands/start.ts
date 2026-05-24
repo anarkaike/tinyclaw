@@ -175,6 +175,7 @@ type WatchedIssue = {
   labels: string[];
   assignees: string[];
   author?: string;
+  body?: string;
 };
 
 type IssueWatchSnapshot = {
@@ -244,6 +245,134 @@ function runGhIssueList(): WatchedIssue[] {
     assignees: (issue.assignees ?? []).map((assignee) => assignee.login),
     author: issue.author?.login,
   }));
+}
+
+function fetchGhIssueDetails(issueNumber: number): WatchedIssue | null {
+  const result = spawnSync('gh', [
+    'issue',
+    'view',
+    String(issueNumber),
+    '--repo',
+    GITHUB_ISSUES_REPO,
+    '--json',
+    'number,title,state,updatedAt,comments,labels,assignees,author,body',
+  ]);
+
+  if (result.status !== 0) {
+    return null;
+  }
+
+  try {
+    const issue = JSON.parse(result.stdout.toString().trim()) as {
+      number: number;
+      title: string;
+      state: string;
+      updatedAt: string;
+      comments: number;
+      labels?: Array<{ name: string }>;
+      assignees?: Array<{ login: string }>;
+      author?: { login: string } | null;
+      body?: string;
+    };
+
+    return {
+      number: issue.number,
+      title: issue.title,
+      state: issue.state,
+      updatedAt: issue.updatedAt,
+      comments: issue.comments,
+      labels: (issue.labels ?? []).map((label) => label.name),
+      assignees: (issue.assignees ?? []).map((assignee) => assignee.login),
+      author: issue.author?.login,
+      body: issue.body ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeText(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9\u00C0-\u024F\s#:_-]/gi, ' ');
+}
+
+function tokenizeForMatch(text: string): Set<string> {
+  return new Set(
+    normalizeText(text)
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length > 2),
+  );
+}
+
+function scoreIssueSessionMatch(issue: WatchedIssue, userId: string, role: string, history: string[]): number {
+  const issueText = normalizeText([issue.title, issue.body ?? '', issue.labels.join(' '), role].join(' '));
+  const tokens = tokenizeForMatch(issueText);
+  let score = 0;
+
+  if (issueText.includes(userId.toLowerCase())) score += 6;
+
+  const issueNumberToken = `#${issue.number}`;
+  if (issueText.includes(issueNumberToken)) score += 4;
+
+  const roleTokens = tokenizeForMatch(role);
+  let roleMatches = 0;
+  for (const token of roleTokens) {
+    if (tokens.has(token)) roleMatches++;
+  }
+  score += Math.min(roleMatches, 6);
+
+  for (const snippet of history) {
+    const snippetTokens = tokenizeForMatch(snippet);
+    let overlap = 0;
+    for (const token of snippetTokens) {
+      if (tokens.has(token)) overlap++;
+    }
+    score += Math.min(overlap, 3);
+  }
+
+  return score;
+}
+
+function inferIssueSessionTargets(
+  issue: WatchedIssue,
+  ownerId: string | undefined,
+  activeSubAgents: Array<{ id: string; role: string }>,
+  historyBySession: Map<string, string[]>,
+): Array<{
+  sessionId: string;
+  label: string;
+  score: number;
+}> {
+  const candidates: Array<{ sessionId: string; label: string; score: number }> = [];
+  const issueText = normalizeText([issue.title, issue.body ?? '', issue.labels.join(' ')].join(' '));
+
+  if (ownerId) {
+    const ownerHistory = historyBySession.get(ownerId) ?? [];
+    candidates.push({
+      sessionId: ownerId,
+      label: 'owner',
+      score: scoreIssueSessionMatch(issue, ownerId, 'owner', ownerHistory),
+    });
+  }
+
+  for (const agent of activeSubAgents) {
+    const agentHistory = historyBySession.get(agent.id) ?? [];
+    candidates.push({
+      sessionId: agent.id,
+      label: agent.role,
+      score: scoreIssueSessionMatch(issue, agent.id, agent.role, agentHistory),
+    });
+  }
+
+  // If the issue clearly references a specific issue number or agent role,
+  // keep the strongest candidate(s). Otherwise, broaden to everyone.
+  const strong = candidates.filter((candidate) => candidate.score >= 4);
+  if (strong.length > 0) {
+    const bestScore = Math.max(...strong.map((candidate) => candidate.score));
+    return strong.filter((candidate) => candidate.score === bestScore);
+  }
+
+  return candidates;
 }
 
 function diffIssueSnapshots(previous: IssueWatchSnapshot | null, current: IssueWatchSnapshot): string[] {
@@ -1318,6 +1447,29 @@ export async function startCommand(): Promise<void> {
         }
 
         const ownerId = configManager.get<string>('owner.ownerId') || 'web:default';
+        const activeSubAgents = db.getAllSubAgents(ownerId, true).filter((agent) =>
+          ['active', 'suspended'].includes(agent.status),
+        );
+        const historyBySession = new Map<string, string[]>();
+        historyBySession.set(ownerId, db.getHistory(ownerId, 20).map((message) => message.content));
+        for (const agent of activeSubAgents) {
+          historyBySession.set(agent.id, db.getHistory(agent.id, 20).map((message) => message.content));
+        }
+
+        const issueSessionMatches = changes.map((change) => {
+          const detail = fetchGhIssueDetails(change.issue.number) ?? change.issue;
+          const targets = inferIssueSessionTargets(detail, ownerId, activeSubAgents, historyBySession);
+          return {
+            issueNumber: detail.number,
+            issueTitle: detail.title,
+            targets,
+            confidence: targets.length > 0 ? targets[0].score : 0,
+            changeSummary: change.changes.join(', '),
+          };
+        });
+
+        const needsBroadcast = issueSessionMatches.some((match) => match.targets.length > 1 || match.confidence < 4);
+
         nudgeEngine.schedule({
           userId: ownerId,
           category: 'system',
@@ -1326,18 +1478,40 @@ export async function startCommand(): Promise<void> {
           deliverAfter: 0,
           metadata: {
             repo: GITHUB_ISSUES_REPO,
-            changes: changes.map((change) => ({
-              issueNumber: change.issue.number,
-              issueTitle: change.issue.title,
-              changeSummary: change.changes.join(', '),
-            })),
+            issueSessionMatches,
+            needsBroadcast,
           },
         });
+
+        if (needsBroadcast) {
+          intercom.emit('task:queued', 'github:issues', {
+            repo: GITHUB_ISSUES_REPO,
+            mode: 'broadcast',
+            issueSessionMatches,
+          });
+        } else {
+          for (const match of issueSessionMatches) {
+            const target = match.targets[0];
+            if (!target) continue;
+            intercom.emit('task:queued', target.sessionId, {
+              repo: GITHUB_ISSUES_REPO,
+              mode: 'targeted',
+              issueNumber: match.issueNumber,
+              issueTitle: match.issueTitle,
+              changeSummary: match.changeSummary,
+              targetSession: target.sessionId,
+              targetLabel: target.label,
+              confidence: target.score,
+            });
+          }
+        }
 
         logger.info('GitHub issues watch: changes detected', {
           repo: GITHUB_ISSUES_REPO,
           watchedIssues: current.issues.length,
           changes: diffs.slice(0, 20),
+          issueSessionMatches,
+          needsBroadcast,
         });
       } catch (err) {
         logger.warn('GitHub issues watch skipped', err, { emoji: '⚠️' });

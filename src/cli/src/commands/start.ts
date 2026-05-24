@@ -9,7 +9,9 @@
  * `tinyclaw setup`.
  */
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createCompactor } from '@tinyclaw/compactor';
@@ -61,6 +63,228 @@ import type { Provider, StreamCallback, Tool } from '@tinyclaw/types';
 import { createWebUI } from '@tinyclaw/web';
 import { RESTART_EXIT_CODE } from '../supervisor.js';
 import { theme } from '../ui/theme.js';
+
+const MACOS_AGENT_HUB_WORKSPACE = join(
+  homedir(),
+  'tinyclaw',
+  'docs',
+  'projects',
+  'macos-agent-control-hub',
+  'workspace',
+);
+
+const SAFE_PROJECT_PULSE_FILES = [
+  'project.manifest.json',
+  'CURRENT_CONTEXT.md',
+  'BACKLOG.md',
+  'SPRINT-01.md',
+  'DECISIONS.md',
+  'RISKS.md',
+  'NEXT-ACTIONS.md',
+  'IMPLEMENTATION-CHECKLIST.md',
+] as const;
+
+const GITHUB_ISSUES_WATCH_STATE_DIR = join(MACOS_AGENT_HUB_WORKSPACE, '.state');
+const GITHUB_ISSUES_WATCH_SNAPSHOT = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'issues-snapshot.json');
+const GITHUB_ISSUES_REPO = 'anarkaike/tinyclaw-contexto-macos';
+const GITHUB_ISSUES_WATCH_INTERVAL = process.env.TINYCLAW_GITHUB_ISSUES_WATCH_INTERVAL || '5m';
+
+function summarizeWorkspaceHeadings(content: string, maxItems = 3): string[] {
+  const headings = content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('#'))
+    .map((line) => line.replace(/^#+\s*/, '').trim())
+    .filter(Boolean);
+
+  return headings.slice(0, maxItems);
+}
+
+function getSafeProjectPulseSnapshot(): {
+  workspaceExists: boolean;
+  missingFiles: string[];
+  manifestName?: string;
+  manifestPhase?: string;
+  currentContextHeadings: string[];
+  nextActions: string[];
+  checklistItems: string[];
+} {
+  if (!existsSync(MACOS_AGENT_HUB_WORKSPACE)) {
+    return {
+      workspaceExists: false,
+      missingFiles: SAFE_PROJECT_PULSE_FILES.map((file) => join(MACOS_AGENT_HUB_WORKSPACE, file)),
+      currentContextHeadings: [],
+      nextActions: [],
+      checklistItems: [],
+    };
+  }
+
+  const missingFiles: string[] = [];
+  const readText = (filename: string): string | null => {
+    const fullPath = join(MACOS_AGENT_HUB_WORKSPACE, filename);
+    if (!existsSync(fullPath)) {
+      missingFiles.push(fullPath);
+      return null;
+    }
+
+    try {
+      return readFileSync(fullPath, 'utf8');
+    } catch {
+      missingFiles.push(fullPath);
+      return null;
+    }
+  };
+
+  const manifestRaw = readText('project.manifest.json');
+  const currentContextRaw = readText('CURRENT_CONTEXT.md');
+  const nextActionsRaw = readText('NEXT-ACTIONS.md');
+  const checklistRaw = readText('IMPLEMENTATION-CHECKLIST.md');
+
+  let manifestName: string | undefined;
+  let manifestPhase: string | undefined;
+  if (manifestRaw) {
+    try {
+      const manifest = JSON.parse(manifestRaw) as {
+        name?: string;
+        phase?: string;
+      };
+      manifestName = typeof manifest.name === 'string' ? manifest.name : undefined;
+      manifestPhase = typeof manifest.phase === 'string' ? manifest.phase : undefined;
+    } catch {
+      missingFiles.push(join(MACOS_AGENT_HUB_WORKSPACE, 'project.manifest.json'));
+    }
+  }
+
+  return {
+    workspaceExists: true,
+    missingFiles,
+    manifestName,
+    manifestPhase,
+    currentContextHeadings: currentContextRaw ? summarizeWorkspaceHeadings(currentContextRaw) : [],
+    nextActions: nextActionsRaw ? summarizeWorkspaceHeadings(nextActionsRaw, 5) : [],
+    checklistItems: checklistRaw ? summarizeWorkspaceHeadings(checklistRaw, 5) : [],
+  };
+}
+
+type WatchedIssue = {
+  number: number;
+  title: string;
+  state: string;
+  updatedAt: string;
+  comments: number;
+  labels: string[];
+  assignees: string[];
+  author?: string;
+};
+
+type IssueWatchSnapshot = {
+  repo: string;
+  seenAt: string;
+  issues: WatchedIssue[];
+};
+
+function ensureIssueWatchStateDir(): void {
+  mkdirSync(GITHUB_ISSUES_WATCH_STATE_DIR, { recursive: true });
+}
+
+function readIssueWatchSnapshot(): IssueWatchSnapshot | null {
+  if (!existsSync(GITHUB_ISSUES_WATCH_SNAPSHOT)) return null;
+
+  try {
+    return JSON.parse(readFileSync(GITHUB_ISSUES_WATCH_SNAPSHOT, 'utf8')) as IssueWatchSnapshot;
+  } catch {
+    return null;
+  }
+}
+
+function writeIssueWatchSnapshot(snapshot: IssueWatchSnapshot): void {
+  ensureIssueWatchStateDir();
+  writeFileSync(GITHUB_ISSUES_WATCH_SNAPSHOT, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+}
+
+function runGhIssueList(): WatchedIssue[] {
+  const result = spawnSync('gh', [
+    'issue',
+    'list',
+    '--repo',
+    GITHUB_ISSUES_REPO,
+    '--state',
+    'all',
+    '--limit',
+    '100',
+    '--json',
+    'number,title,state,updatedAt,comments,labels,assignees,author',
+  ]);
+
+  if (result.status !== 0) {
+    throw new Error(result.stderr.toString().trim() || 'gh issue list failed');
+  }
+
+  const raw = result.stdout.toString().trim();
+  if (!raw) return [];
+
+  const parsed = JSON.parse(raw) as Array<{
+    number: number;
+    title: string;
+    state: string;
+    updatedAt: string;
+    comments: number;
+    labels?: Array<{ name: string }>;
+    assignees?: Array<{ login: string }>;
+    author?: { login: string } | null;
+  }>;
+
+  return parsed.map((issue) => ({
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    updatedAt: issue.updatedAt,
+    comments: issue.comments,
+    labels: (issue.labels ?? []).map((label) => label.name),
+    assignees: (issue.assignees ?? []).map((assignee) => assignee.login),
+    author: issue.author?.login,
+  }));
+}
+
+function diffIssueSnapshots(previous: IssueWatchSnapshot | null, current: IssueWatchSnapshot): string[] {
+  if (!previous) {
+    return current.issues.map(
+      (issue) =>
+        `#${issue.number} ${issue.title} | state=${issue.state} | updatedAt=${issue.updatedAt} | comments=${issue.comments}`,
+    );
+  }
+
+  const prevMap = new Map(previous.issues.map((issue) => [issue.number, issue]));
+  const diffs: string[] = [];
+
+  for (const issue of current.issues) {
+    const prev = prevMap.get(issue.number);
+    if (!prev) {
+      diffs.push(`#${issue.number} nova issue: ${issue.title}`);
+      continue;
+    }
+
+    const changedFields: string[] = [];
+    if (prev.title !== issue.title) changedFields.push('title');
+    if (prev.state !== issue.state) changedFields.push('state');
+    if (prev.updatedAt !== issue.updatedAt) changedFields.push('updatedAt');
+    if (prev.comments !== issue.comments) changedFields.push('comments');
+    if (prev.labels.join(',') !== issue.labels.join(',')) changedFields.push('labels');
+    if (prev.assignees.join(',') !== issue.assignees.join(',')) changedFields.push('assignees');
+
+    if (changedFields.length > 0) {
+      diffs.push(`#${issue.number} ${issue.title} mudou em: ${changedFields.join(', ')}`);
+    }
+  }
+
+  const previousNumbers = new Set(previous.issues.map((issue) => issue.number));
+  for (const issue of current.issues) previousNumbers.delete(issue.number);
+  for (const removed of previousNumbers) {
+    diffs.push(`#${removed} removida do snapshot`);
+  }
+
+  return diffs;
+}
 
 /**
  * Run the agent start flow
@@ -979,6 +1203,74 @@ export async function startCommand(): Promise<void> {
           context,
         );
       });
+    },
+  });
+
+  // Safe project maintenance pulse — read-only audit of the macOS agent hub
+  // workspace. It only summarizes the already-defined project files and logs
+  // a short status snapshot. No writes, no network, no destructive actions.
+  pulse.register({
+    id: 'macos-agent-hub-safe-review',
+    schedule: '5m',
+    runOnStart: true,
+    handler: async () => {
+      const snapshot = getSafeProjectPulseSnapshot();
+
+      if (!snapshot.workspaceExists) {
+        logger.info('Safe project pulse skipped: workspace not found', {
+          workspace: MACOS_AGENT_HUB_WORKSPACE,
+        });
+        return;
+      }
+
+      logger.info('Safe project pulse snapshot', {
+        workspace: MACOS_AGENT_HUB_WORKSPACE,
+        manifestName: snapshot.manifestName,
+        manifestPhase: snapshot.manifestPhase,
+        currentContextHeadings: snapshot.currentContextHeadings,
+        nextActions: snapshot.nextActions,
+        checklistItems: snapshot.checklistItems,
+        missingFiles: snapshot.missingFiles,
+      });
+    },
+  });
+
+  // GitHub issues watch — read-only monitor for the central context repo.
+  // Tracks issue metadata changes (title, body via updatedAt, state, labels,
+  // assignees, and comment count) and persists a compact local snapshot.
+  pulse.register({
+    id: 'github-issues-watch',
+    schedule: GITHUB_ISSUES_WATCH_INTERVAL,
+    runOnStart: true,
+    handler: async () => {
+      try {
+        const current = {
+          repo: GITHUB_ISSUES_REPO,
+          seenAt: new Date().toISOString(),
+          issues: runGhIssueList(),
+        };
+
+        const previous = readIssueWatchSnapshot();
+        const diffs = diffIssueSnapshots(previous, current);
+
+        writeIssueWatchSnapshot(current);
+
+        if (diffs.length === 0) {
+          logger.info('GitHub issues watch: no changes detected', {
+            repo: GITHUB_ISSUES_REPO,
+            watchedIssues: current.issues.length,
+          });
+          return;
+        }
+
+        logger.info('GitHub issues watch: changes detected', {
+          repo: GITHUB_ISSUES_REPO,
+          watchedIssues: current.issues.length,
+          changes: diffs.slice(0, 20),
+        });
+      } catch (err) {
+        logger.warn('GitHub issues watch skipped', err, { emoji: '⚠️' });
+      }
     },
   });
 

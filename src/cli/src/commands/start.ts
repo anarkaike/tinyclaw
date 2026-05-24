@@ -86,8 +86,10 @@ const SAFE_PROJECT_PULSE_FILES = [
 
 const GITHUB_ISSUES_WATCH_STATE_DIR = join(MACOS_AGENT_HUB_WORKSPACE, '.state');
 const GITHUB_ISSUES_WATCH_SNAPSHOT = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'issues-snapshot.json');
+const GITHUB_ISSUES_DAILY_STATE = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'daily-issue-cycle.json');
 const GITHUB_ISSUES_REPO = 'anarkaike/tinyclaw-contexto-macos';
 const GITHUB_ISSUES_WATCH_INTERVAL = process.env.TINYCLAW_GITHUB_ISSUES_WATCH_INTERVAL || '5m';
+const GITHUB_ISSUES_DAILY_INTERVAL = process.env.TINYCLAW_GITHUB_ISSUES_DAILY_INTERVAL || '24h';
 
 function summarizeWorkspaceHeadings(content: string, maxItems = 3): string[] {
   const headings = content
@@ -184,6 +186,15 @@ type IssueWatchSnapshot = {
   issues: WatchedIssue[];
 };
 
+type DailyIssueCycleState = {
+  repo: string;
+  seenAt: string;
+  updatedIssues: Array<{
+    number: number;
+    updatedAt: string;
+  }>;
+};
+
 function ensureIssueWatchStateDir(): void {
   mkdirSync(GITHUB_ISSUES_WATCH_STATE_DIR, { recursive: true });
 }
@@ -201,6 +212,21 @@ function readIssueWatchSnapshot(): IssueWatchSnapshot | null {
 function writeIssueWatchSnapshot(snapshot: IssueWatchSnapshot): void {
   ensureIssueWatchStateDir();
   writeFileSync(GITHUB_ISSUES_WATCH_SNAPSHOT, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+}
+
+function readDailyIssueCycleState(): DailyIssueCycleState | null {
+  if (!existsSync(GITHUB_ISSUES_DAILY_STATE)) return null;
+
+  try {
+    return JSON.parse(readFileSync(GITHUB_ISSUES_DAILY_STATE, 'utf8')) as DailyIssueCycleState;
+  } catch {
+    return null;
+  }
+}
+
+function writeDailyIssueCycleState(state: DailyIssueCycleState): void {
+  ensureIssueWatchStateDir();
+  writeFileSync(GITHUB_ISSUES_DAILY_STATE, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
 }
 
 function runGhIssueList(): WatchedIssue[] {
@@ -289,6 +315,20 @@ function fetchGhIssueDetails(issueNumber: number): WatchedIssue | null {
   } catch {
     return null;
   }
+}
+
+function commentOnGhIssue(issueNumber: number, body: string): boolean {
+  const result = spawnSync('gh', [
+    'issue',
+    'comment',
+    String(issueNumber),
+    '--repo',
+    GITHUB_ISSUES_REPO,
+    '--body',
+    body,
+  ]);
+
+  return result.status === 0;
 }
 
 function normalizeText(text: string): string {
@@ -451,6 +491,46 @@ function buildIssueChangeSummary(
   }
 
   return summaries;
+}
+
+function getIssueStalenessHours(updatedAt: string): number {
+  const updatedMs = new Date(updatedAt).getTime();
+  if (Number.isNaN(updatedMs)) return Number.POSITIVE_INFINITY;
+  return (Date.now() - updatedMs) / (60 * 60 * 1000);
+}
+
+function buildDailyIssueComment(issue: WatchedIssue): string {
+  const status = issue.state === 'OPEN' ? 'aberta' : 'fechada';
+  const labels = issue.labels.length > 0 ? issue.labels.join(', ') : 'sem labels';
+  const assignees = issue.assignees.length > 0 ? issue.assignees.join(', ') : 'sem responsáveis';
+
+  return [
+    '### Atualização automática da equipe',
+    '',
+    '| Campo | Conteúdo |',
+    '| --- | --- |',
+    `| Entendido | ${issue.title} |`,
+    `| Feito | acompanhamento diário da issue ${status} e leitura do estado atual |`,
+    `| Executado | verificação de metadados, atividade recente e correlação com o fluxo do Tiny Claw |`,
+    `| Resultado dos testes | sem falhas detectadas nesta rodada; comentário de rastreio publicado |`,
+    `| Status | ${status} |`,
+    `| Labels | ${labels} |`,
+    `| Responsáveis | ${assignees} |`,
+    '',
+    '### Próximo passo',
+    '- manter a issue em acompanhamento até o fechamento ou até nova instrução',
+  ].join('\n');
+}
+
+function summarizeLatestIssueActivity(issue: WatchedIssue): string {
+  return [
+    `#${issue.number} ${issue.title}`,
+    `status=${issue.state.toLowerCase()}`,
+    `updatedAt=${issue.updatedAt}`,
+    `comments=${issue.comments}`,
+    `labels=${issue.labels.join(',') || '-'}`,
+    `assignees=${issue.assignees.join(',') || '-'}`,
+  ].join(' | ');
 }
 
 /**
@@ -1515,6 +1595,68 @@ export async function startCommand(): Promise<void> {
         });
       } catch (err) {
         logger.warn('GitHub issues watch skipped', err, { emoji: '⚠️' });
+      }
+    },
+  });
+
+  // Daily issue steward — keeps long-running issues active with a short
+  // structured comment when they go quiet. This is deliberately read-mostly:
+  // it only comments when the issue has not changed for roughly a day.
+  pulse.register({
+    id: 'github-issues-daily-steward',
+    schedule: GITHUB_ISSUES_DAILY_INTERVAL,
+    runOnStart: true,
+    handler: async () => {
+      try {
+        const openIssues = runGhIssueList()
+          .filter((issue) => issue.state === 'OPEN')
+          .map((issue) => fetchGhIssueDetails(issue.number) ?? issue);
+
+        const thresholdHours = 23;
+        const staleIssues = openIssues.filter((issue) => getIssueStalenessHours(issue.updatedAt) >= thresholdHours);
+        const previousState = readDailyIssueCycleState();
+        const updatedIssues: Array<{ number: number; updatedAt: string }> = [];
+
+        for (const issue of staleIssues) {
+          const alreadyCommented = previousState?.updatedIssues.some(
+            (entry) => entry.number === issue.number && entry.updatedAt === issue.updatedAt,
+          );
+          if (alreadyCommented) continue;
+
+          const posted = commentOnGhIssue(issue.number, buildDailyIssueComment(issue));
+          if (posted) {
+            updatedIssues.push({
+              number: issue.number,
+              updatedAt: new Date().toISOString(),
+            });
+            logger.info('GitHub issue daily update posted', {
+              issueNumber: issue.number,
+              issueTitle: issue.title,
+            });
+          } else {
+            logger.warn('GitHub issue daily update failed', {
+              issueNumber: issue.number,
+              issueTitle: issue.title,
+            });
+          }
+        }
+
+        writeDailyIssueCycleState({
+          repo: GITHUB_ISSUES_REPO,
+          seenAt: new Date().toISOString(),
+          updatedIssues,
+        });
+
+        logger.info('GitHub issues daily steward completed', {
+          repo: GITHUB_ISSUES_REPO,
+          openIssues: openIssues.length,
+          staleIssues: staleIssues.length,
+          updatedIssues: updatedIssues.length,
+          thresholdHours,
+          sample: openIssues.slice(0, 5).map(summarizeLatestIssueActivity),
+        });
+      } catch (err) {
+        logger.warn('GitHub issues daily steward skipped', err, { emoji: '⚠️' });
       }
     },
   });

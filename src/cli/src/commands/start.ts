@@ -180,8 +180,29 @@ type WatchedIssue = {
   assignees: string[];
   author?: string;
   body?: string;
+  metadata?: IssueOperationalMetadata;
   latestCommentAuthor?: string;
   latestCommentBody?: string;
+};
+
+type IssueOperationalMetadata = {
+  de?: string;
+  para?: string;
+  agente?: string;
+  responsavel?: string;
+  revisor?: string;
+  fila?: string;
+  status?: string;
+  hil?: string;
+  pai?: string;
+  sprint?: string;
+  etapa?: string;
+  prioridade?: string;
+  tipo?: string;
+  dominio?: string;
+  categoria?: string;
+  modulo?: string;
+  tags?: string[];
 };
 
 type IssueWatchSnapshot = {
@@ -251,6 +272,91 @@ function readDrainState(): DrainState | null {
 function writeDrainState(state: DrainState): void {
   ensureIssueWatchStateDir();
   writeFileSync(GITHUB_ISSUES_DRAIN_STATE, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}
+
+function normalizeIssueFieldName(field: string): string {
+  return field
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function parseIssueOperationalMetadata(body: string | undefined): IssueOperationalMetadata {
+  if (!body) return {};
+
+  const metadata: IssueOperationalMetadata = {};
+  const rows = body.matchAll(/^\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|$/gm);
+
+  for (const row of rows) {
+    const rawKey = row[1] ?? '';
+    const rawValue = row[2]?.trim() ?? '';
+    const key = normalizeIssueFieldName(rawKey);
+
+    switch (key) {
+      case 'de':
+        metadata.de = rawValue;
+        break;
+      case 'para':
+        metadata.para = rawValue;
+        break;
+      case 'agente':
+        metadata.agente = rawValue;
+        break;
+      case 'responsavel':
+      case 'responsaveis':
+        metadata.responsavel = rawValue;
+        break;
+      case 'revisor':
+        metadata.revisor = rawValue;
+        break;
+      case 'fila':
+        metadata.fila = rawValue;
+        break;
+      case 'status':
+        metadata.status = rawValue;
+        break;
+      case 'hil':
+        metadata.hil = rawValue;
+        break;
+      case 'pai':
+        metadata.pai = rawValue;
+        break;
+      case 'sprint':
+        metadata.sprint = rawValue;
+        break;
+      case 'etapa':
+        metadata.etapa = rawValue;
+        break;
+      case 'prioridade':
+        metadata.prioridade = rawValue;
+        break;
+      case 'tipo':
+        metadata.tipo = rawValue;
+        break;
+      case 'dominio':
+        metadata.dominio = rawValue;
+        break;
+      case 'categoria':
+        metadata.categoria = rawValue;
+        break;
+      case 'modulo':
+        metadata.modulo = rawValue;
+        break;
+      case 'tags':
+        metadata.tags = rawValue
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter(Boolean);
+        break;
+      default:
+        break;
+    }
+  }
+
+  return metadata;
 }
 
 function runGhIssueList(): WatchedIssue[] {
@@ -335,6 +441,7 @@ function fetchGhIssueDetails(issueNumber: number): WatchedIssue | null {
       assignees: (issue.assignees ?? []).map((assignee) => assignee.login),
       author: issue.author?.login,
       body: issue.body ?? '',
+      metadata: parseIssueOperationalMetadata(issue.body ?? ''),
     };
   } catch {
     return null;
@@ -454,7 +561,23 @@ function inferIssueSessionTargets(
   score: number;
 }> {
   const candidates: Array<{ sessionId: string; label: string; score: number }> = [];
-  const issueText = normalizeText([issue.title, issue.body ?? '', issue.labels.join(' ')].join(' '));
+  const issueText = normalizeText(
+    [
+      issue.title,
+      issue.body ?? '',
+      issue.labels.join(' '),
+      issue.metadata?.de ?? '',
+      issue.metadata?.para ?? '',
+      issue.metadata?.agente ?? '',
+      issue.metadata?.responsavel ?? '',
+      issue.metadata?.revisor ?? '',
+      issue.metadata?.fila ?? '',
+      issue.metadata?.sprint ?? '',
+      issue.metadata?.dominio ?? '',
+      issue.metadata?.modulo ?? '',
+      issue.metadata?.tags?.join(' ') ?? '',
+    ].join(' '),
+  );
 
   if (ownerId) {
     const ownerHistory = historyBySession.get(ownerId) ?? [];
@@ -472,6 +595,21 @@ function inferIssueSessionTargets(
       label: agent.role,
       score: scoreIssueSessionMatch(issue, agent.id, agent.role, agentHistory),
     });
+  }
+
+  const metadataRoles = [issue.metadata?.agente, issue.metadata?.responsavel, issue.metadata?.revisor, issue.metadata?.para]
+    .filter(Boolean)
+    .map((value) => normalizeText(String(value)));
+  if (metadataRoles.length > 0) {
+    for (const candidate of candidates) {
+      const candidateName = normalizeText(candidate.label);
+      const candidateSession = normalizeText(candidate.sessionId);
+      for (const role of metadataRoles) {
+        if (candidateName.includes(role) || role.includes(candidateName) || candidateSession.includes(role)) {
+          candidate.score += 5;
+        }
+      }
+    }
   }
 
   // If the issue clearly references a specific issue number or agent role,
@@ -749,13 +887,18 @@ export async function startCommand(): Promise<void> {
   // must be present for the agent to run. After a purge, the config DB
   // (soul seed + owner auth) is wiped even if secrets are preserved.
 
-  const hasOllamaKey = await secretsManager.check(buildProviderKeyName('ollama'));
+  const primaryProviderConfig = configManager.get<string>('providers.primary.model');
+  const requiredProviderKey =
+    primaryProviderConfig === '@tinyclaw/plugin-provider-openai'
+      ? buildProviderKeyName('openai')
+      : buildProviderKeyName('ollama');
+  const hasProviderKey = await secretsManager.check(requiredProviderKey);
   const hasSoulSeed = configManager.get<number>('heartware.seed') !== undefined;
   const hasOwnerAuth = configManager.get<string>('owner.ownerId') !== undefined;
 
-  if (!hasOllamaKey || !hasSoulSeed || !hasOwnerAuth) {
+  if (!hasProviderKey || !hasSoulSeed || !hasOwnerAuth) {
     const missing: string[] = [];
-    if (!hasOllamaKey) missing.push('API key');
+    if (!hasProviderKey) missing.push('API key');
     if (!hasSoulSeed) missing.push('soul seed');
     if (!hasOwnerAuth) missing.push('owner authentication');
 
@@ -834,64 +977,6 @@ export async function startCommand(): Promise<void> {
     logger.info('No SHIELD.md found — shield enforcement disabled', undefined, { emoji: '🛡️' });
   }
 
-  // --- Initialize default provider (reads key from secrets-engine) ------
-
-  const defaultProvider = createOllamaProvider({
-    secrets: secretsManager,
-    model: providerModel,
-    baseUrl: providerBaseUrl,
-  });
-
-  // --- Pre-flight: verify provider connectivity -------------------------
-
-  try {
-    const reachable = await defaultProvider.isAvailable();
-    if (!reachable) {
-      console.log();
-      console.log(theme.error('  ✖ Cannot reach the default provider.'));
-      console.log();
-      console.log(`    Provider : ${theme.label(defaultProvider.name)}`);
-      console.log(`    Base URL : ${theme.dim(providerBaseUrl)}`);
-      console.log();
-      console.log('    Possible causes:');
-      console.log('      • The provider service may be temporarily down');
-      console.log('      • The base URL may be incorrect');
-      console.log('      • A firewall or proxy may be blocking the connection');
-      console.log();
-      console.log(`    Run ${theme.cmd('tinyclaw setup')} to reconfigure your provider.`);
-      console.log();
-      await secretsManager.close();
-      process.exit(1);
-    }
-  } catch (err) {
-    const msg = (err as Error).message ?? '';
-    const isAuthError = msg.startsWith('Authentication failed');
-
-    console.log();
-    if (isAuthError) {
-      console.log(theme.error('  ✖ Provider authentication failed (401).'));
-      console.log();
-      console.log(`    Provider : ${theme.label(defaultProvider.name)}`);
-      console.log(`    Base URL : ${theme.dim(providerBaseUrl)}`);
-      console.log();
-      console.log('    Your API key may be invalid, expired, or revoked.');
-      console.log(`    Run ${theme.cmd('tinyclaw setup')} to enter a new API key.`);
-    } else {
-      console.log(theme.error('  ✖ Provider connectivity check failed.'));
-      console.log();
-      console.log(`    Provider : ${theme.label(defaultProvider.name)}`);
-      console.log(`    Base URL : ${theme.dim(providerBaseUrl)}`);
-      console.log(`    Error    : ${theme.dim(msg)}`);
-      console.log();
-      console.log(`    Run ${theme.cmd('tinyclaw setup')} to reconfigure your provider.`);
-    }
-    console.log();
-    await secretsManager.close();
-    process.exit(1);
-  }
-
-  logger.info('Default provider connected and verified', undefined, { emoji: '✅' });
-
   // --- Load plugins ------------------------------------------------------
 
   const plugins = await loadPlugins(configManager);
@@ -920,6 +1005,14 @@ export async function startCommand(): Promise<void> {
       logger.error(`Failed to initialize provider plugin "${pp.name}":`, err);
     }
   }
+
+  // --- Initialize default provider (reads key from secrets-engine) ------
+
+  const defaultProvider = createOllamaProvider({
+    secrets: secretsManager,
+    model: providerModel,
+    baseUrl: providerBaseUrl,
+  });
 
   // --- Resolve primary provider (overrides built-in as default) ----------
 
@@ -976,6 +1069,54 @@ export async function startCommand(): Promise<void> {
       );
     }
   }
+
+  // --- Pre-flight: verify selected provider connectivity ----------------
+
+  try {
+    const reachable = await routerDefaultProvider.isAvailable();
+    if (!reachable) {
+      console.log();
+      console.log(theme.error('  ✖ Cannot reach the selected provider.'));
+      console.log();
+      console.log(`    Provider : ${theme.label(routerDefaultProvider.name)}`);
+      console.log(`    Base URL : ${theme.dim(routerDefaultProvider.id === defaultProvider.id ? providerBaseUrl : 'plugin-managed')}`);
+      console.log();
+      console.log('    Possible causes:');
+      console.log('      • The provider service may be temporarily down');
+      console.log('      • The API key may be missing or invalid');
+      console.log('      • A firewall or proxy may be blocking the connection');
+      console.log();
+      console.log(`    Run ${theme.cmd('tinyclaw setup')} to reconfigure your provider.`);
+      console.log();
+      await secretsManager.close();
+      process.exit(1);
+    }
+  } catch (err) {
+    const msg = (err as Error).message ?? '';
+    const isAuthError = msg.startsWith('Authentication failed');
+
+    console.log();
+    if (isAuthError) {
+      console.log(theme.error('  ✖ Provider authentication failed (401).'));
+      console.log();
+      console.log(`    Provider : ${theme.label(routerDefaultProvider.name)}`);
+      console.log();
+      console.log('    Your API key may be invalid, expired, or revoked.');
+      console.log(`    Run ${theme.cmd('tinyclaw setup')} to enter a new API key.`);
+    } else {
+      console.log(theme.error('  ✖ Provider connectivity check failed.'));
+      console.log();
+      console.log(`    Provider : ${theme.label(routerDefaultProvider.name)}`);
+      console.log(`    Error    : ${theme.dim(msg)}`);
+      console.log();
+      console.log(`    Run ${theme.cmd('tinyclaw setup')} to reconfigure your provider.`);
+    }
+    console.log();
+    await secretsManager.close();
+    process.exit(1);
+  }
+
+  logger.info('Selected provider connected and verified', undefined, { emoji: '✅' });
 
   // --- Initialize smart routing orchestrator -----------------------------
 
@@ -1609,7 +1750,8 @@ export async function startCommand(): Promise<void> {
   pulse.register({
     id: 'github-issues-watch',
     schedule: GITHUB_ISSUES_WATCH_INTERVAL,
-    runOnStart: true,
+    // Avoid blocking the whole runtime boot; this watcher runs on interval.
+    runOnStart: false,
     handler: async () => {
       try {
         const current = {
@@ -1643,6 +1785,7 @@ export async function startCommand(): Promise<void> {
             comments: change.issue.comments,
             labels: change.issue.labels,
             assignees: change.issue.assignees,
+            metadata: change.issue.metadata,
             changeSummary: summary,
           });
         }
@@ -1666,6 +1809,7 @@ export async function startCommand(): Promise<void> {
             targets,
             confidence: targets.length > 0 ? targets[0].score : 0,
             changeSummary: change.changes.join(', '),
+            metadata: detail.metadata,
           };
         });
 

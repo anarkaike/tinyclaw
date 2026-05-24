@@ -1,0 +1,39 @@
+{
+  "name": "@tinyclaw/plugin-tools-issue-bridge",
+  "version": "2.0.0",
+  "description": "Issue bridge tools plugin for Tiny Claw",
+  "license": "GPL-3.0",
+  "author": "Waren Gonzaga",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/warengonzaga/tinyclaw.git",
+    "directory": "plugins/tools/plugin-tools-issue-bridge"
+  },
+  "homepage": "https://github.com/warengonzaga/tinyclaw/tree/main/plugins/tools/plugin-tools-issue-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/warengonzaga/tinyclaw/issues"
+  },
+  "keywords": [
+    "tinyclaw",
+    "plugin",
+    "tools",
+    "github",
+    "issues"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outdir ./dist --target bun"
+  },
+  "dependencies": {
+    "@tinyclaw/logger": "workspace:*",
+    "@tinyclaw/types": "workspace:*"
+  }
+}

@@ -286,6 +286,44 @@ function diffIssueSnapshots(previous: IssueWatchSnapshot | null, current: IssueW
   return diffs;
 }
 
+function buildIssueChangeSummary(
+  previous: IssueWatchSnapshot | null,
+  current: IssueWatchSnapshot,
+): Array<{
+  issue: WatchedIssue;
+  changes: string[];
+}> {
+  if (!previous) {
+    return current.issues.map((issue) => ({
+      issue,
+      changes: ['snapshot-inicial'],
+    }));
+  }
+
+  const prevMap = new Map(previous.issues.map((issue) => [issue.number, issue]));
+  const summaries: Array<{ issue: WatchedIssue; changes: string[] }> = [];
+
+  for (const issue of current.issues) {
+    const prev = prevMap.get(issue.number);
+    if (!prev) {
+      summaries.push({ issue, changes: ['nova-issue'] });
+      continue;
+    }
+
+    const changes: string[] = [];
+    if (prev.title !== issue.title) changes.push('titulo');
+    if (prev.state !== issue.state) changes.push('status');
+    if (prev.updatedAt !== issue.updatedAt) changes.push('descricao-ou-metadados');
+    if (prev.comments !== issue.comments) changes.push('comentarios');
+    if (prev.labels.join(',') !== issue.labels.join(',')) changes.push('labels');
+    if (prev.assignees.join(',') !== issue.assignees.join(',')) changes.push('responsaveis');
+
+    if (changes.length > 0) summaries.push({ issue, changes });
+  }
+
+  return summaries;
+}
+
 /**
  * Run the agent start flow
  */
@@ -1252,6 +1290,7 @@ export async function startCommand(): Promise<void> {
 
         const previous = readIssueWatchSnapshot();
         const diffs = diffIssueSnapshots(previous, current);
+        const changes = buildIssueChangeSummary(previous, current);
 
         writeIssueWatchSnapshot(current);
 
@@ -1262,6 +1301,38 @@ export async function startCommand(): Promise<void> {
           });
           return;
         }
+
+        for (const change of changes) {
+          const summary = change.changes.join(', ');
+          intercom.emit('blackboard:proposal', 'github:issues', {
+            repo: GITHUB_ISSUES_REPO,
+            issueNumber: change.issue.number,
+            issueTitle: change.issue.title,
+            issueState: change.issue.state,
+            updatedAt: change.issue.updatedAt,
+            comments: change.issue.comments,
+            labels: change.issue.labels,
+            assignees: change.issue.assignees,
+            changeSummary: summary,
+          });
+        }
+
+        const ownerId = configManager.get<string>('owner.ownerId') || 'web:default';
+        nudgeEngine.schedule({
+          userId: ownerId,
+          category: 'system',
+          content: `Detectei ${changes.length} atualização(ões) nas issues do repositório central. Abra o painel do GitHub para revisar comentários, título, status, labels ou atribuições.`,
+          priority: 'low',
+          deliverAfter: 0,
+          metadata: {
+            repo: GITHUB_ISSUES_REPO,
+            changes: changes.map((change) => ({
+              issueNumber: change.issue.number,
+              issueTitle: change.issue.title,
+              changeSummary: change.changes.join(', '),
+            })),
+          },
+        });
 
         logger.info('GitHub issues watch: changes detected', {
           repo: GITHUB_ISSUES_REPO,

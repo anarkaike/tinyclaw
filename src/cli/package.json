@@ -56,6 +56,7 @@
     "@tinyclaw/plugin-tools-issue-bridge": "workspace:*",
     "@tinyclaw/plugin-tools-memory-core": "workspace:*",
     "@tinyclaw/plugin-tools-context-lossless": "workspace:*",
+    "@tinyclaw/plugin-tools-channel-bridge": "workspace:*",
     "@tinyclaw/plugin-tools-project-runner": "workspace:*",
     "@tinyclaw/plugin-tools-resource-watch": "workspace:*",
     "@tinyclaw/plugin-tools-security-watch": "workspace:*",

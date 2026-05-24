@@ -1,0 +1,35 @@
+{
+  "name": "@tinyclaw/plugin-tools-channel-bridge",
+  "version": "2.0.0",
+  "description": "Channel bridge tools plugin for Tiny Claw",
+  "license": "GPL-3.0",
+  "author": "Waren Gonzaga",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anarkaike/tinyclaw.git",
+    "directory": "plugins/tools/plugin-tools-channel-bridge"
+  },
+  "homepage": "https://github.com/anarkaike/tinyclaw/tree/main/plugins/tools/plugin-tools-channel-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/anarkaike/tinyclaw/issues"
+  },
+  "keywords": [
+    "tinyclaw",
+    "plugin",
+    "tools",
+    "channel",
+    "bridge"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outdir ./dist --target bun"
+  }
+}

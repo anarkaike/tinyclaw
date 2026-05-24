@@ -12,6 +12,7 @@
         "@types/bun": "latest",
         "@types/node": "^25.3.0",
         "husky": "^9.1.7",
+        "tinyclaw": "workspace:*",
         "typescript": "^5.7.0",
       },
     },
@@ -198,6 +199,22 @@
         "@tinyclaw/types": "workspace:*",
       },
     },
+    "plugins/provider/plugin-provider-gemini": {
+      "name": "@tinyclaw/plugin-provider-gemini",
+      "version": "2.0.0",
+      "dependencies": {
+        "@tinyclaw/logger": "workspace:*",
+        "@tinyclaw/types": "workspace:*",
+      },
+    },
+    "plugins/provider/plugin-provider-groq": {
+      "name": "@tinyclaw/plugin-provider-groq",
+      "version": "2.0.0",
+      "dependencies": {
+        "@tinyclaw/logger": "workspace:*",
+        "@tinyclaw/types": "workspace:*",
+      },
+    },
     "plugins/provider/plugin-provider-openai": {
       "name": "@tinyclaw/plugin-provider-openai",
       "version": "2.0.0",
@@ -205,6 +222,42 @@
         "@tinyclaw/logger": "workspace:*",
         "@tinyclaw/types": "workspace:*",
       },
+    },
+    "plugins/tools/plugin-tools-channel-bridge": {
+      "name": "@tinyclaw/plugin-tools-channel-bridge",
+      "version": "2.0.0",
+    },
+    "plugins/tools/plugin-tools-context-lossless": {
+      "name": "@tinyclaw/plugin-tools-context-lossless",
+      "version": "2.0.0",
+    },
+    "plugins/tools/plugin-tools-issue-bridge": {
+      "name": "@tinyclaw/plugin-tools-issue-bridge",
+      "version": "2.0.0",
+      "dependencies": {
+        "@tinyclaw/logger": "workspace:*",
+        "@tinyclaw/types": "workspace:*",
+      },
+    },
+    "plugins/tools/plugin-tools-memory-core": {
+      "name": "@tinyclaw/plugin-tools-memory-core",
+      "version": "2.0.0",
+      "dependencies": {
+        "@tinyclaw/logger": "workspace:*",
+        "@tinyclaw/types": "workspace:*",
+      },
+    },
+    "plugins/tools/plugin-tools-project-runner": {
+      "name": "@tinyclaw/plugin-tools-project-runner",
+      "version": "2.0.0",
+    },
+    "plugins/tools/plugin-tools-resource-watch": {
+      "name": "@tinyclaw/plugin-tools-resource-watch",
+      "version": "2.0.0",
+    },
+    "plugins/tools/plugin-tools-security-watch": {
+      "name": "@tinyclaw/plugin-tools-security-watch",
+      "version": "2.0.0",
     },
     "src/cli": {
       "name": "tinyclaw",
@@ -226,6 +279,18 @@
         "@tinyclaw/matcher": "workspace:*",
         "@tinyclaw/memory": "workspace:*",
         "@tinyclaw/nudge": "workspace:*",
+        "@tinyclaw/plugin-channel-discord": "workspace:*",
+        "@tinyclaw/plugin-channel-friends": "workspace:*",
+        "@tinyclaw/plugin-provider-gemini": "workspace:*",
+        "@tinyclaw/plugin-provider-groq": "workspace:*",
+        "@tinyclaw/plugin-provider-openai": "workspace:*",
+        "@tinyclaw/plugin-tools-channel-bridge": "workspace:*",
+        "@tinyclaw/plugin-tools-context-lossless": "workspace:*",
+        "@tinyclaw/plugin-tools-issue-bridge": "workspace:*",
+        "@tinyclaw/plugin-tools-memory-core": "workspace:*",
+        "@tinyclaw/plugin-tools-project-runner": "workspace:*",
+        "@tinyclaw/plugin-tools-resource-watch": "workspace:*",
+        "@tinyclaw/plugin-tools-security-watch": "workspace:*",
         "@tinyclaw/plugins": "workspace:*",
         "@tinyclaw/pulse": "workspace:*",
         "@tinyclaw/queue": "workspace:*",
@@ -501,7 +566,25 @@
 
     "@tinyclaw/plugin-channel-friends": ["@tinyclaw/plugin-channel-friends@workspace:plugins/channel/plugin-channel-friends"],
 
+    "@tinyclaw/plugin-provider-gemini": ["@tinyclaw/plugin-provider-gemini@workspace:plugins/provider/plugin-provider-gemini"],
+
+    "@tinyclaw/plugin-provider-groq": ["@tinyclaw/plugin-provider-groq@workspace:plugins/provider/plugin-provider-groq"],
+
     "@tinyclaw/plugin-provider-openai": ["@tinyclaw/plugin-provider-openai@workspace:plugins/provider/plugin-provider-openai"],
+
+    "@tinyclaw/plugin-tools-channel-bridge": ["@tinyclaw/plugin-tools-channel-bridge@workspace:plugins/tools/plugin-tools-channel-bridge"],
+
+    "@tinyclaw/plugin-tools-context-lossless": ["@tinyclaw/plugin-tools-context-lossless@workspace:plugins/tools/plugin-tools-context-lossless"],
+
+    "@tinyclaw/plugin-tools-issue-bridge": ["@tinyclaw/plugin-tools-issue-bridge@workspace:plugins/tools/plugin-tools-issue-bridge"],
+
+    "@tinyclaw/plugin-tools-memory-core": ["@tinyclaw/plugin-tools-memory-core@workspace:plugins/tools/plugin-tools-memory-core"],
+
+    "@tinyclaw/plugin-tools-project-runner": ["@tinyclaw/plugin-tools-project-runner@workspace:plugins/tools/plugin-tools-project-runner"],
+
+    "@tinyclaw/plugin-tools-resource-watch": ["@tinyclaw/plugin-tools-resource-watch@workspace:plugins/tools/plugin-tools-resource-watch"],
+
+    "@tinyclaw/plugin-tools-security-watch": ["@tinyclaw/plugin-tools-security-watch@workspace:plugins/tools/plugin-tools-security-watch"],
 
     "@tinyclaw/plugins": ["@tinyclaw/plugins@workspace:packages/plugins"],
 

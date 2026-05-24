@@ -38,6 +38,7 @@ Este documento converte o estudo de mercado em plugins internos do Tiny Claw.
 - `resource-watch`
 - `security-watch`
 - `project-runner`
+- `channel-bridge`
 
 ## Critério de prontidão
 

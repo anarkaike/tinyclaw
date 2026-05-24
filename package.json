@@ -13,7 +13,7 @@
     "src/*",
     "plugins/channel/*",
     "plugins/provider/*",
-    "plugins/tools/*"
+    "plugins/tools/*",
   ],
   "scripts": {
     "dev": "bun run --cwd src/cli dev",

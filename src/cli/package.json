@@ -55,6 +55,7 @@
     "@tinyclaw/plugin-provider-openai": "workspace:*",
     "@tinyclaw/plugin-tools-issue-bridge": "workspace:*",
     "@tinyclaw/plugin-tools-memory-core": "workspace:*",
+    "@tinyclaw/plugin-tools-resource-watch": "workspace:*",
     "@tinyclaw/pulse": "workspace:*",
     "@tinyclaw/queue": "workspace:*",
     "@tinyclaw/router": "workspace:*",

@@ -1,0 +1,35 @@
+{
+  "name": "@tinyclaw/plugin-tools-context-lossless",
+  "version": "2.0.0",
+  "description": "Context lossless tools plugin for Tiny Claw",
+  "license": "GPL-3.0",
+  "author": "Waren Gonzaga",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/warengonzaga/tinyclaw.git",
+    "directory": "plugins/tools/plugin-tools-context-lossless"
+  },
+  "homepage": "https://github.com/warengonzaga/tinyclaw/tree/main/plugins/tools/plugin-tools-context-lossless#readme",
+  "bugs": {
+    "url": "https://github.com/warengonzaga/tinyclaw/issues"
+  },
+  "keywords": [
+    "tinyclaw",
+    "plugin",
+    "tools",
+    "context",
+    "lossless"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outdir ./dist --target bun"
+  }
+}

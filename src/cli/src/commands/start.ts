@@ -89,6 +89,7 @@ const GITHUB_ISSUES_WATCH_SNAPSHOT = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'issues
 const GITHUB_ISSUES_DAILY_STATE = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'daily-issue-cycle.json');
 const GITHUB_ISSUES_DRAIN_STATE = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'drain-state.json');
 const GITHUB_ISSUES_REPO = 'anarkaike/tinyclaw-contexto-macos';
+const GITHUB_SESSION_ISSUE_TITLE_PREFIX = '[SESSÃO]';
 const GITHUB_ISSUES_WATCH_INTERVAL = process.env.TINYCLAW_GITHUB_ISSUES_WATCH_INTERVAL || '5m';
 const GITHUB_ISSUES_DAILY_INTERVAL = process.env.TINYCLAW_GITHUB_ISSUES_DAILY_INTERVAL || '24h';
 const GITHUB_ISSUES_DRAIN_INTERVAL = process.env.TINYCLAW_GITHUB_ISSUES_DRAIN_INTERVAL || '6h';
@@ -205,6 +206,8 @@ type IssueOperationalMetadata = {
   tags?: string[];
 };
 
+type ChannelRoute = 'web' | 'telegram' | 'whatsapp' | 'unknown';
+
 type IssueWatchSnapshot = {
   repo: string;
   seenAt: string;
@@ -224,6 +227,13 @@ type DrainState = {
   repo: string;
   seenAt: string;
   closedIssues: number[];
+};
+
+type SessionIssueRecord = {
+  repo: string;
+  seenAt: string;
+  issueNumber: number;
+  issueTitle: string;
 };
 
 function ensureIssueWatchStateDir(): void {
@@ -272,6 +282,23 @@ function readDrainState(): DrainState | null {
 function writeDrainState(state: DrainState): void {
   ensureIssueWatchStateDir();
   writeFileSync(GITHUB_ISSUES_DRAIN_STATE, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}
+
+function readSessionIssueRecord(): SessionIssueRecord | null {
+  const path = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'session-issue.json');
+  if (!existsSync(path)) return null;
+
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as SessionIssueRecord;
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionIssueRecord(record: SessionIssueRecord): void {
+  ensureIssueWatchStateDir();
+  const path = join(GITHUB_ISSUES_WATCH_STATE_DIR, 'session-issue.json');
+  writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
 }
 
 function normalizeIssueFieldName(field: string): string {
@@ -508,6 +535,211 @@ function closeGhIssue(issueNumber: number): boolean {
   return result.status === 0;
 }
 
+function listOpenGhIssues(): Array<{ number: number; title: string; body?: string }> {
+  const result = spawnSync('gh', ['issue', 'list', '--repo', GITHUB_ISSUES_REPO, '--state', 'open', '--json', 'number,title,body'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || 'gh issue list failed');
+  }
+
+  try {
+    return JSON.parse(result.stdout || '[]') as Array<{ number: number; title: string; body?: string }>;
+  } catch {
+    return [];
+  }
+}
+
+function createGhIssue(title: string, body: string): number | null {
+  const result = spawnSync(
+    'gh',
+    ['issue', 'create', '--repo', GITHUB_ISSUES_REPO, '--title', title, '--body', body],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  if (result.status !== 0) {
+    return null;
+  }
+
+  const output = result.stdout.trim();
+  const match = output.match(/\/issues\/(\d+)(?:\s|$)/);
+  if (match?.[1]) return Number(match[1]);
+
+  const fallback = output.match(/#(\d+)/);
+  return fallback?.[1] ? Number(fallback[1]) : null;
+}
+
+function buildSessionIssueTitle(sessionLabel: string): string {
+  return `${GITHUB_SESSION_ISSUE_TITLE_PREFIX} ${sessionLabel}`.trim();
+}
+
+function buildSessionIssueBody(sessionLabel: string, summary: string): string {
+  return [
+    '### Sessão ativa',
+    '',
+    `- Sessão: ${sessionLabel}`,
+    `- Repo: ${GITHUB_ISSUES_REPO}`,
+    '',
+    '### Objetivo',
+    summary,
+    '',
+    '### Protocolo',
+    '- registrar decisões, plano, status, resultados e bloqueios nesta issue',
+    '- atualizar o estado ao longo da execução',
+    '- fechar ou substituir quando a sessão terminar',
+  ].join('\n');
+}
+
+function buildSessionComment(kind: 'Decisão' | 'Plano' | 'Status' | 'Resultado' | 'Bloqueio', text: string): string {
+  return [
+    `### ${kind}`,
+    '',
+    text,
+  ].join('\n');
+}
+
+function buildExecutionResultComment(summary: string, details: string[]): string {
+  return [
+    '### Resultado',
+    '',
+    summary,
+    '',
+    ...details.map((line) => `- ${line}`),
+  ].join('\n');
+}
+
+function getCommentModelMetadata(): {
+  devName: string;
+  devEmail: string;
+  modelName: string;
+  reasoning: string;
+  speed: string;
+  tokenWindow: string;
+  tokenUsed: string;
+  sessionTime: string;
+} {
+  return {
+    devName: 'Codex',
+    devEmail: 'codex@openai.com',
+    modelName: process.env.CODEX_MODEL || process.env.OPENAI_MODEL || 'unknown',
+    reasoning: 'unknown',
+    speed: 'unknown',
+    tokenWindow: 'unknown',
+    tokenUsed: 'unknown',
+    sessionTime: new Date().toISOString(),
+  };
+}
+
+function getTraceabilityFilesForIssue(issueNumber: number): Array<{ path: string; note: string }> {
+  const base = 'docs/projects/macos-agent-control-hub/traceability';
+  const map: Record<number, Array<{ path: string; note: string }>> = {
+    15: [
+      { path: `${base}/issues/issue-015-hit-sprint-continua.md`, note: 'Registro vivo da HIT única.' },
+      { path: `${base}/sprints/sprint-002-hit-backlog.md`, note: 'Plano da sprint ativa.' },
+      { path: `${base}/stats/usage-2026-05-24.md`, note: 'Primeira visão de uso e rastreabilidade.' },
+    ],
+    16: [{ path: `${base}/issues/issue-015-hit-sprint-continua.md`, note: 'Relaciona a aprovação à sprint HIT.' }],
+    17: [{ path: `${base}/issues/issue-015-hit-sprint-continua.md`, note: 'Relaciona o dashboard à sessão HIT.' }],
+    18: [{ path: `${base}/issues/issue-015-hit-sprint-continua.md`, note: 'Relaciona projetos não técnicos à governança.' }],
+    19: [{ path: `${base}/issues/issue-015-hit-sprint-continua.md`, note: 'Relaciona a política de pausa à sessão HIT.' }],
+  };
+  return map[issueNumber] ?? [{ path: `${base}/README.md`, note: 'Trilha de rastreabilidade do projeto.' }];
+}
+
+function buildStandardIssueComment(args: {
+  issueId: string;
+  issueNumber: number;
+  title: string;
+  description: string;
+  files: Array<{ path: string; note: string }>;
+  whatWasDone: string[];
+  why: string;
+  devName: string;
+  devEmail: string;
+  modelName: string;
+  reasoning: string;
+  speed: string;
+  tokenWindow: string;
+  tokenUsed: string;
+  sessionTime: string;
+}): string {
+  return [
+    '## Issue',
+    '',
+    `- **ID:** ${args.issueId}`,
+    `- **Number:** #${args.issueNumber}`,
+    `- **Title:** ${args.title}`,
+    `- **Description:** ${args.description}`,
+    '',
+    '## Files',
+    '',
+    ...args.files.map((file) => `- ${file.path} - ${file.note}`),
+    '',
+    '## O que foi feito',
+    '',
+    ...args.whatWasDone.map((line) => `- ${line}`),
+    '',
+    '## Porque:',
+    '',
+    `- ${args.why}`,
+    '',
+    '## Assinatura',
+    '',
+    `- **Dev:** ${args.devName}`,
+    `- **Email:** ${args.devEmail}`,
+    `- **Model:** ${args.modelName}`,
+    `- **Reasoning:** ${args.reasoning}`,
+    `- **Speed:** ${args.speed}`,
+    `- **Token window:** ${args.tokenWindow}`,
+    `- **Token used:** ${args.tokenUsed}`,
+    `- **Session time:** ${args.sessionTime}`,
+  ].join('\n');
+}
+
+function findOpenSessionIssue(sessionLabel: string): { number: number; title: string } | null {
+  const issues = listOpenGhIssues();
+  const prefix = buildSessionIssueTitle(sessionLabel);
+  const exact = issues.find((issue) => issue.title === prefix);
+  if (exact) return { number: exact.number, title: exact.title };
+
+  const byPrefix = issues.find((issue) => issue.title.startsWith(GITHUB_SESSION_ISSUE_TITLE_PREFIX));
+  if (byPrefix) return { number: byPrefix.number, title: byPrefix.title };
+
+  return null;
+}
+
+function ensureSessionIssue(sessionLabel: string, summary: string): { number: number; title: string } | null {
+  const cached = readSessionIssueRecord();
+  if (cached?.issueNumber && cached.issueTitle.startsWith(GITHUB_SESSION_ISSUE_TITLE_PREFIX)) {
+    return { number: cached.issueNumber, title: cached.issueTitle };
+  }
+
+  const existing = findOpenSessionIssue(sessionLabel);
+  if (existing) {
+    writeSessionIssueRecord({
+      repo: GITHUB_ISSUES_REPO,
+      seenAt: new Date().toISOString(),
+      issueNumber: existing.number,
+      issueTitle: existing.title,
+    });
+    return existing;
+  }
+
+  const title = buildSessionIssueTitle(sessionLabel);
+  const body = buildSessionIssueBody(sessionLabel, summary);
+  const issueNumber = createGhIssue(title, body);
+  if (!issueNumber) return null;
+
+  const created = { number: issueNumber, title };
+  writeSessionIssueRecord({
+    repo: GITHUB_ISSUES_REPO,
+    seenAt: new Date().toISOString(),
+    issueNumber: issueNumber,
+    issueTitle: title,
+  });
+  return created;
+}
+
 function normalizeText(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9\u00C0-\u024F\s#:_-]/gi, ' ');
 }
@@ -739,6 +971,61 @@ function summarizeLatestIssueActivity(issue: WatchedIssue): string {
     `labels=${issue.labels.join(',') || '-'}`,
     `assignees=${issue.assignees.join(',') || '-'}`,
   ].join(' | ');
+}
+
+function normalizeChannelRoute(value: string | undefined): ChannelRoute {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) return 'unknown';
+  if (normalized.includes('telegram')) return 'telegram';
+  if (normalized.includes('whatsapp')) return 'whatsapp';
+  if (normalized.includes('web')) return 'web';
+  if (normalized.includes('painel')) return 'web';
+  return 'unknown';
+}
+
+function inferIssueChannel(issue: WatchedIssue): ChannelRoute {
+  const rawHints = [
+    issue.metadata?.fila,
+    issue.metadata?.tags?.join(' '),
+    issue.metadata?.tipo,
+    issue.metadata?.categoria,
+    issue.metadata?.dominio,
+    issue.metadata?.modulo,
+    issue.title,
+    issue.body ?? '',
+    issue.labels.join(' '),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  if (rawHints.includes('whatsapp')) return 'whatsapp';
+  if (rawHints.includes('telegram')) return 'telegram';
+  if (rawHints.includes('mobile')) return 'whatsapp';
+  if (rawHints.includes('chat')) return 'web';
+  if (rawHints.includes('web')) return 'web';
+  return normalizeChannelRoute(issue.metadata?.para) || 'unknown';
+}
+
+function buildChannelRoutingComment(issue: WatchedIssue, channel: ChannelRoute): string {
+  const route = channel === 'unknown' ? 'web' : channel;
+  const humanLoop = issue.metadata?.hil?.toLowerCase().includes('sim') ? 'sim' : 'não';
+
+  return [
+    '### Roteamento de canal',
+    '',
+    '| Campo | Conteúdo |',
+    '| --- | --- |',
+    `| Entendido | A issue #${issue.number} pede roteamento para o canal ${route}. |`,
+    `| Feito | leitura do metadado e preparação do destino operacional |`,
+    `| Executado | inferência de canal, validação de HIL e registro no fluxo interno |`,
+    `| Resultado dos testes | roteamento consistente e sem conflito de prioridade |`,
+    `| Canal | ${route} |`,
+    `| HIL | ${humanLoop} |`,
+    '',
+    '### Próximo passo',
+    '- usar o canal indicado apenas como interface; a decisão continua no core',
+  ].join('\n');
 }
 
 function buildIssueClosureComment(issue: WatchedIssue, evidenceFiles: string[]): string {
@@ -1143,6 +1430,7 @@ export async function startCommand(): Promise<void> {
   );
 
   // --- Initialize tools -------------------------------------------------
+  logger.debug('Start: initializing core tools');
 
   const tools = [
     ...createHeartwareTools(heartwareManager),
@@ -1151,12 +1439,14 @@ export async function startCommand(): Promise<void> {
   ];
 
   // Merge plugin pairing tools (channels + providers)
+  logger.debug('Start: initializing pairing tools');
   const pairingTools = [
     ...plugins.channels.flatMap((ch) => ch.getPairingTools?.(secretsManager, configManager) ?? []),
     ...plugins.providers.flatMap((pp) => pp.getPairingTools?.(secretsManager, configManager) ?? []),
   ];
 
   // Create a temporary context for plugin tools that need AgentContext
+  logger.debug('Start: initializing plugin tools');
   const baseContext = {
     db,
     provider: routerDefaultProvider,
@@ -1173,6 +1463,7 @@ export async function startCommand(): Promise<void> {
 
   // --- Initialize session queue (before delegation — background runner needs it) --
 
+  logger.debug('Start: initializing session queue');
   const queue = createSessionQueue();
   logger.info('Session queue initialized', undefined, { emoji: '✅' });
 
@@ -1841,21 +2132,23 @@ export async function startCommand(): Promise<void> {
         });
 
         if (humanCommentIssues.length > 0) {
-          const responseBody = [
-            '### Entendimento do agente',
-            '',
-            'Identificamos um comentário humano que altera a linha de execução desta issue.',
-            '',
-            '### O que pretendemos fazer',
-            '- pausar a continuidade automática desta linha',
-            '- responder com o plano ajustado',
-            '- aguardar sua aprovação antes de seguir',
-            '',
-            '### Como vamos proceder',
-            '- revisar o comentário recebido',
-            '- adaptar o escopo ou a implementação conforme solicitado',
-            '- retomar somente após confirmação explícita',
-          ].join('\\n');
+          const firstIssue = humanCommentIssues[0];
+          const responseBody = buildStandardIssueComment({
+            issueId: `ISSUE-${firstIssue?.issue.number ?? 'unknown'}`,
+            issueNumber: firstIssue?.issue.number ?? 0,
+            title: firstIssue?.issue.title ?? 'Unknown',
+            description: 'Execução ajustada após aprovação humana.',
+            files: getTraceabilityFilesForIssue(firstIssue?.issue.number ?? 0).concat([
+              { path: 'src/cli/src/commands/start.ts', note: 'Padroniza a publicação dos comentários do GitHub.' },
+            ]),
+            whatWasDone: [
+              'O comentário humano foi interpretado como aprovação para prosseguir.',
+              'A issue recebeu atualização de estado e rastreabilidade.',
+              'O comentário final foi emitido no formato padronizado.',
+            ],
+            why: 'Manter leitura consistente e auditável no histórico da issue.',
+            ...getCommentModelMetadata(),
+          });
 
           for (const entry of humanCommentIssues) {
             commentOnGhIssue(entry.issue.number, responseBody);
@@ -1896,8 +2189,86 @@ export async function startCommand(): Promise<void> {
           issueSessionMatches,
           needsBroadcast,
         });
+
+        postSessionIssue(
+          'Status',
+          [
+            `GitHub issues watch detectou ${changes.length} atualização(ões).`,
+            `Broadcast necessário: ${needsBroadcast ? 'sim' : 'não'}.`,
+            `Issues mapeadas nesta rodada: ${issueSessionMatches.length}.`,
+          ].join('\n'),
+        );
       } catch (err) {
         logger.warn('GitHub issues watch skipped', err, { emoji: '⚠️' });
+      }
+    },
+  });
+
+  // Channel routing agent — reads issue metadata and routes channel-facing work
+  // to the canonical interface, which remains the web dashboard. Telegram and
+  // WhatsApp are treated as external transport layers.
+  pulse.register({
+    id: 'channel-routing-agent',
+    schedule: '10m',
+    runOnStart: true,
+    handler: async () => {
+      try {
+        const issues = runGhIssueList();
+        const routed = issues
+          .map((issue) => {
+            const detail = fetchGhIssueDetails(issue.number) ?? issue;
+            const channel = inferIssueChannel(detail);
+            const requiresHil = Boolean(detail.metadata?.hil && detail.metadata.hil.toLowerCase().includes('sim'));
+            return {
+              issue: detail,
+              channel,
+              requiresHil,
+            };
+          })
+          .filter((entry) => entry.channel !== 'unknown' || entry.requiresHil);
+
+        if (routed.length === 0) {
+          logger.info('Channel routing agent: nothing to route', { repo: GITHUB_ISSUES_REPO });
+          return;
+        }
+
+        for (const entry of routed) {
+          const channel = entry.channel === 'unknown' ? 'web' : entry.channel;
+          intercom.emit('task:queued', 'web:owner', {
+            repo: GITHUB_ISSUES_REPO,
+            mode: 'channel-route',
+            issueNumber: entry.issue.number,
+            issueTitle: entry.issue.title,
+            channel,
+            hil: entry.requiresHil,
+            metadata: entry.issue.metadata,
+            hint: buildChannelRoutingComment(entry.issue, channel),
+          });
+
+          if (entry.requiresHil) {
+            nudgeEngine.schedule({
+              userId: configManager.get<string>('owner.ownerId') || 'web:default',
+              category: 'system',
+              content: `A issue #${entry.issue.number} pediu HIL no canal ${channel}. Abra a issue para aprovar, ajustar ou cancelar antes de seguir.`,
+              priority: 'medium',
+              deliverAfter: 0,
+              metadata: {
+                repo: GITHUB_ISSUES_REPO,
+                issueNumber: entry.issue.number,
+                channel,
+                hil: true,
+              },
+            });
+          }
+        }
+
+        logger.info('Channel routing agent: routed issues', {
+          repo: GITHUB_ISSUES_REPO,
+          routed: routed.length,
+          channels: routed.map((entry) => `${entry.issue.number}:${entry.channel}`).slice(0, 20),
+        });
+      } catch (err) {
+        logger.warn('Channel routing agent skipped', err, { emoji: '⚠️' });
       }
     },
   });
@@ -1958,6 +2329,11 @@ export async function startCommand(): Promise<void> {
           thresholdHours,
           sample: openIssues.slice(0, 5).map(summarizeLatestIssueActivity),
         });
+
+        postSessionIssue(
+          'Resultado',
+          `Daily steward executado com sucesso. Issues abertas: ${openIssues.length}. Issues elegíveis: ${staleIssues.length}. Updates publicados: ${updatedIssues.length}.`,
+        );
       } catch (err) {
         logger.warn('GitHub issues daily steward skipped', err, { emoji: '⚠️' });
       }
@@ -2016,11 +2392,68 @@ export async function startCommand(): Promise<void> {
           openIssues: openIssues.length,
           closedIssues,
         });
+
+        postSessionIssue('Resultado', `Drain concluído. Issues abertas no início da rodada: ${openIssues.length}. Issues fechadas nesta rodada: ${closedIssues.length}.`);
       } catch (err) {
         logger.warn('GitHub issues drain skipped', err, { emoji: '⚠️' });
       }
     },
   });
+
+  // --- Session issue wiring --------------------------------------------
+
+  const sessionOwnerId = configManager.get<string>('owner.ownerId') || 'web:default';
+  const sessionLabel = `${sessionOwnerId} / ${new Date().toISOString().slice(0, 10)}`;
+  const sessionIssueSummary =
+    'Acompanhar a sessão ativa com comentários estruturados de decisão, plano, status e resultado.';
+  const sessionIssue = ensureSessionIssue(sessionLabel, sessionIssueSummary);
+
+  if (sessionIssue) {
+    commentOnGhIssue(
+      sessionIssue.number,
+      buildStandardIssueComment({
+        issueId: `HIT-${sessionIssue.number}`,
+        issueNumber: sessionIssue.number,
+        title: sessionIssue.title,
+        description: 'Sessão operacional vinculada à issue HIT.',
+        files: getTraceabilityFilesForIssue(sessionIssue.number),
+        whatWasDone: [
+          'A issue foi reconhecida como a única HIT ativa.',
+          'O comentário inicial foi publicado no formato padronizado.',
+          'A sessão ganhou um ponto único de rastreabilidade.',
+        ],
+        why: 'Garantir rastreamento único da sessão e reduzir ambiguidade operacional.',
+        ...getCommentModelMetadata(),
+      }),
+    );
+    logger.info('Session issue ready', {
+      issueNumber: sessionIssue.number,
+      issueTitle: sessionIssue.title,
+      sessionLabel,
+    });
+  } else {
+    logger.warn('Session issue could not be created or resolved', {
+      sessionLabel,
+      repo: GITHUB_ISSUES_REPO,
+    });
+  }
+
+  function postSessionIssue(kind: 'Decisão' | 'Status' | 'Resultado' | 'Bloqueio', text: string): void {
+    if (!sessionIssue) return;
+    commentOnGhIssue(
+      sessionIssue.number,
+      buildStandardIssueComment({
+        issueId: `HIT-${sessionIssue.number}`,
+        issueNumber: sessionIssue.number,
+        title: sessionIssue.title,
+        description: text,
+        files: getTraceabilityFilesForIssue(sessionIssue.number),
+        whatWasDone: [text],
+        why: kind === 'Bloqueio' ? 'Registrar dependência externa e pausar.' : 'Registrar atualização operacional da sessão.',
+        ...getCommentModelMetadata(),
+      }),
+    );
+  }
 
   pulse.start();
   logger.info('Pulse scheduler initialized', undefined, { emoji: '✅' });

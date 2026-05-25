@@ -30,6 +30,14 @@ Este documento converte o estudo de mercado em plugins internos do Tiny Claw.
 6. `project-runner`
 7. `channel-bridge`
 
+## Estratégia de canal
+
+- `web` continua sendo o ponto de aprovação HIL
+- `telegram` usa a API oficial do Telegram Bot
+- `whatsapp` entra via gateway não oficial de menor atrito técnico
+- a lógica de decisão nunca mora no canal
+- o canal só recebe, traduz e encaminha
+
 ## Entregues
 
 - `memory-core`
